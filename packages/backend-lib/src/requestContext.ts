@@ -1,13 +1,14 @@
 import { SpanStatusCode } from "@opentelemetry/api";
-import { and, eq, inArray, or } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { IncomingHttpHeaders } from "http";
+import { OIDC_ID_TOKEN_COOKIE_NAME } from "isomorphic-lib/src/constants";
 import { assertUnreachable } from "isomorphic-lib/src/typeAssertions";
 import { err, ok } from "neverthrow";
 import { sortBy } from "remeda";
 
 import { decodeJwtHeader } from "./auth";
 import config from "./config";
-import { db } from "./db";
+import { type Db, db } from "./db";
 import {
   workspace as dbWorkspace,
   workspaceMembeAccount as dbWorkspaceMembeAccount,
@@ -15,6 +16,7 @@ import {
   workspaceMemberRole as dbWorkspaceMemberRole,
 } from "./db/schema";
 import logger from "./logger";
+import { isProfileEmailVerified } from "./openIdProfile";
 import { withSpan } from "./openTelemetry";
 import { requestContextPostProcessor } from "./requestContextPostProcessor";
 import {
@@ -22,6 +24,7 @@ import {
   OpenIdProfile,
   RequestContextErrorType,
   RequestContextResult,
+  RoleEnum,
   Workspace,
   WorkspaceMember,
   WorkspaceMemberResource,
@@ -33,7 +36,6 @@ import {
   WorkspaceTypeApp,
   WorkspaceTypeAppEnum,
 } from "./types";
-import { isProfileEmailVerified } from "./openIdProfile";
 
 export const SESSION_KEY = "df-session-key";
 
@@ -46,6 +48,80 @@ interface RolesWithWorkspace {
       })
     | null;
   memberRoles: WorkspaceMemberRoleResource[];
+}
+
+async function countMembersWithDomainRoleInWorkspace(
+  tx: Db,
+  {
+    workspaceId,
+    workspaceDomain,
+  }: {
+    workspaceId: string;
+    workspaceDomain: string;
+  },
+): Promise<number> {
+  const normalized = workspaceDomain.trim().toLowerCase();
+  if (!normalized) {
+    return 0;
+  }
+  const [row] = await tx
+    .select({
+      count: sql<number>`cast(count(*) as int)`,
+    })
+    .from(dbWorkspaceMemberRole)
+    .innerJoin(
+      dbWorkspaceMember,
+      eq(dbWorkspaceMemberRole.workspaceMemberId, dbWorkspaceMember.id),
+    )
+    .where(
+      and(
+        eq(dbWorkspaceMemberRole.workspaceId, workspaceId),
+        sql`lower(split_part(${dbWorkspaceMember.email}, '@', 2)) = ${normalized}`,
+      ),
+    );
+  return row?.count ?? 0;
+}
+
+async function provisionDomainMatchRoleForMember({
+  member,
+  workspace,
+}: {
+  member: WorkspaceMember;
+  workspace: Workspace;
+}): Promise<WorkspaceMemberRole | undefined> {
+  const wsDomain = workspace.domain?.trim();
+  if (!wsDomain) {
+    return undefined;
+  }
+  return db().transaction(async (tx) => {
+    const [locked] = await tx
+      .select()
+      .from(dbWorkspace)
+      .where(eq(dbWorkspace.id, workspace.id))
+      .for("update");
+    if (!locked || locked.status !== WorkspaceStatusDbEnum.Active) {
+      return undefined;
+    }
+    const existingDomainMembers = await countMembersWithDomainRoleInWorkspace(
+      tx,
+      {
+        workspaceId: workspace.id,
+        workspaceDomain: wsDomain,
+      },
+    );
+    const roleForJoin =
+      existingDomainMembers === 0 ? RoleEnum.Admin : RoleEnum.Viewer;
+    const [inserted] = await tx
+      .insert(dbWorkspaceMemberRole)
+      .values({
+        workspaceId: workspace.id,
+        workspaceMemberId: member.id,
+        role: roleForJoin,
+      })
+      .onConflictDoNothing()
+      .returning();
+    return inserted;
+  });
 }
 
 export async function findAndCreateRoles(
@@ -77,27 +153,31 @@ export async function findAndCreateRoles(
     (w) => w.WorkspaceMemberRole === null,
   );
   let roles = workspaces.flatMap((w) => w.WorkspaceMemberRole ?? []);
-  if (domainWorkspacesWithoutRole.length !== 0) {
-    const newRoles = (
-      await Promise.all(
-        domainWorkspacesWithoutRole.map((w) =>
-          db()
-            .insert(dbWorkspaceMemberRole)
-            .values({
-              workspaceId: w.Workspace.id,
-              workspaceMemberId: member.id,
-              role: "Admin",
-            })
-            .onConflictDoNothing()
-            .returning(),
-        ),
-      )
-    ).flat();
+  const sortedDomainWorkspacesWithoutRole = sortBy(
+    domainWorkspacesWithoutRole,
+    (w) => w.Workspace.id,
+  );
+  if (sortedDomainWorkspacesWithoutRole.length !== 0) {
+    const newRoles: WorkspaceMemberRole[] = [];
+    for (const w of sortedDomainWorkspacesWithoutRole) {
+      if (!domain || !w.Workspace.domain?.trim()) {
+        continue;
+      }
+      // One transaction + FOR UPDATE per workspace; must run in sorted id order (deadlocks).
+      // eslint-disable-next-line no-await-in-loop -- intentional serialization per workspace
+      const inserted = await provisionDomainMatchRoleForMember({
+        member,
+        workspace: w.Workspace,
+      });
+      if (inserted) {
+        newRoles.push(inserted);
+      }
+    }
     logger().debug(
       {
         newRoles,
       },
-      "new roles",
+      "new roles from domain match (first domain user Admin, later Viewer)",
     );
     for (const role of newRoles) {
       roles.push(role);
@@ -265,14 +345,6 @@ export async function getMultiTenantRequestContext({
   let [existingMember, account] = await Promise.all([
     db().query.workspaceMember.findFirst({
       where: eq(dbWorkspaceMember.email, email),
-      with: {
-        workspaceMemberRoles: {
-          limit: 1,
-          with: {
-            workspace: true,
-          },
-        },
-      },
     }),
     db().query.workspaceMembeAccount.findFirst({
       where: and(
@@ -415,6 +487,36 @@ async function getAnonymousRequestContext(): Promise<RequestContextResult> {
   });
 }
 
+function readOidcIdTokenFromCookieHeader(
+  cookieHeader: IncomingHttpHeaders["cookie"],
+): string | null {
+  if (!cookieHeader) {
+    return null;
+  }
+  let combined: string | null = null;
+  if (typeof cookieHeader === "string") {
+    combined = cookieHeader;
+  } else if (Array.isArray(cookieHeader)) {
+    combined = [...cookieHeader].join("; ");
+  }
+  if (!combined) {
+    return null;
+  }
+  const name = `${OIDC_ID_TOKEN_COOKIE_NAME}=`;
+  const parts = combined.split(";").map((c) => c.trim());
+  for (const part of parts) {
+    if (part.startsWith(name)) {
+      const raw = part.slice(name.length);
+      try {
+        return decodeURIComponent(raw);
+      } catch {
+        return raw;
+      }
+    }
+  }
+  return null;
+}
+
 export async function getRequestContext(
   headers: IncomingHttpHeaders,
   profile?: OpenIdProfile,
@@ -437,10 +539,19 @@ export async function getRequestContext(
         break;
       }
       case "multi-tenant": {
-        const authorizationToken =
+        let authorizationToken: string | null =
           headers.authorization && typeof headers.authorization === "string"
             ? headers.authorization
             : null;
+
+        if (!authorizationToken) {
+          const idToken = readOidcIdTokenFromCookieHeader(headers.cookie);
+          if (idToken) {
+            authorizationToken = idToken.startsWith("Bearer ")
+              ? idToken
+              : `Bearer ${idToken}`;
+          }
+        }
 
         result = await getMultiTenantRequestContext({
           authorizationToken,

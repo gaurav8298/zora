@@ -36,6 +36,7 @@ import { upsertMessageTemplate } from "./messaging";
 import { getOrCreateEmailProviders } from "./messaging/email";
 import { getOrCreateSmsProviders } from "./messaging/sms";
 import { drizzleMigrate } from "./migrate";
+import { onboardUser } from "./onboarding";
 import {
   upsertSubscriptionGroup,
   upsertSubscriptionSecret,
@@ -512,6 +513,22 @@ export interface BootstrapWorkspaceParams {
   features?: Features;
 }
 
+/** After `bootstrapPostgres` for a non-Parent workspace: default events + compute/cron when enabled. */
+export async function bootstrapWorkspaceAfterPostgres({
+  workspaceId,
+}: {
+  workspaceId: string;
+}): Promise<void> {
+  if (config().bootstrapEvents) {
+    await insertDefaultEvents({ workspaceId });
+  }
+
+  if (config().bootstrapWorker) {
+    await bootstrapComputeProperties({ workspaceId });
+    await startGlobalCron();
+  }
+}
+
 export async function bootstrapWorkspace({
   workspaceName,
   workspaceType,
@@ -536,14 +553,7 @@ export async function bootstrapWorkspace({
   }
   const workspaceId = workspace.value.id;
 
-  if (config().bootstrapEvents) {
-    await insertDefaultEvents({ workspaceId });
-  }
-
-  if (config().bootstrapWorker) {
-    await bootstrapComputeProperties({ workspaceId });
-    await startGlobalCron();
-  }
+  await bootstrapWorkspaceAfterPostgres({ workspaceId });
   return { workspaceId };
 }
 
@@ -667,11 +677,37 @@ export async function bootstrapDependencies(): Promise<void> {
   await Promise.all(promises);
 }
 
+async function maybeBootstrapOnboardAdmin({
+  workspaceName,
+}: {
+  workspaceName: string;
+}): Promise<void> {
+  const { authMode, bootstrapOnboardEmail } = config();
+  if (authMode !== "multi-tenant") {
+    return;
+  }
+  const email = bootstrapOnboardEmail?.trim();
+  if (!email) {
+    return;
+  }
+  const result = await onboardUser({ workspaceName, email });
+  if (result.isErr()) {
+    logger().warn(
+      { err: result.error, email, workspaceName },
+      "bootstrap onboard-user failed; run admin onboard-user manually",
+    );
+    return;
+  }
+  logger().info({ email, workspaceName }, "bootstrap onboarded workspace admin");
+}
+
 export default async function bootstrap(
   params: BootstrapWorkspaceParams,
 ): Promise<{ workspaceId: string }> {
   await bootstrapDependencies();
-  return bootstrapWorkspace(params);
+  const { workspaceId } = await bootstrapWorkspace(params);
+  await maybeBootstrapOnboardAdmin({ workspaceName: params.workspaceName });
+  return { workspaceId };
 }
 
 export interface BootstrapWithoutDefaultsParams {
