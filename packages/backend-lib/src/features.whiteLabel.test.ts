@@ -14,6 +14,7 @@ import {
   buildWhiteLabelConfigFromUpsertRequest,
   findCanonicalWhiteLabelOwnerWorkspaceId,
   getFeatures,
+  getInstanceWideWhiteLabelConfigForLogin,
   getWhiteLabelSettingsForApi,
   whiteLabelMutationAllowedForTargetWorkspace,
 } from "./features";
@@ -298,5 +299,85 @@ describe("instance-wide white label in getFeatures", () => {
 
     const map = await getFeatures({ workspaceId: ws.id });
     expect(map.WhiteLabel).toBeUndefined();
+  });
+});
+
+describe("getInstanceWideWhiteLabelConfigForLogin", () => {
+  let loginTestWorkspaceId: string;
+
+  beforeEach(() => {
+    loginTestWorkspaceId = randomUUID();
+    resetConfigMock();
+  });
+
+  afterEach(async () => {
+    resetConfigMock();
+    await db()
+      .delete(dbFeature)
+      .where(eq(dbFeature.workspaceId, loginTestWorkspaceId));
+    await db()
+      .delete(dbWorkspace)
+      .where(eq(dbWorkspace.id, loginTestWorkspaceId));
+  });
+
+  it("returns null when instance-wide white label is disabled", async () => {
+    mockedConfig.mockImplementation(() => ({
+      ...defaultConfigImplementation(),
+      instanceWideWhiteLabel: false,
+    }));
+
+    await insert({
+      table: dbWorkspace,
+      values: {
+        id: loginTestWorkspaceId,
+        name: "login-wl-test",
+        updatedAt: new Date(),
+      },
+    });
+    const cfg: WhiteLabelFeatureConfig = {
+      type: FeatureNamesEnum.WhiteLabel,
+      title: "Should not appear",
+    };
+    await db().insert(dbFeature).values({
+      workspaceId: loginTestWorkspaceId,
+      name: FeatureNamesEnum.WhiteLabel,
+      enabled: true,
+      config: cfg,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    expect(await getInstanceWideWhiteLabelConfigForLogin()).toBeNull();
+  });
+
+  it("returns canonical config when instance-wide is enabled", async () => {
+    mockedConfig.mockImplementation(() => ({
+      ...defaultConfigImplementation(),
+      instanceWideWhiteLabel: true,
+    }));
+
+    await insert({
+      table: dbWorkspace,
+      values: {
+        id: loginTestWorkspaceId,
+        name: "login-wl-test",
+        updatedAt: new Date(),
+      },
+    });
+    const cfg: WhiteLabelFeatureConfig = {
+      type: FeatureNamesEnum.WhiteLabel,
+      title: "Login brand",
+      navCardTitle: "Welcome",
+    };
+    await db().insert(dbFeature).values({
+      workspaceId: loginTestWorkspaceId,
+      name: FeatureNamesEnum.WhiteLabel,
+      enabled: true,
+      config: cfg,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+
+    expect(await getInstanceWideWhiteLabelConfigForLogin()).toEqual(cfg);
   });
 });

@@ -118,6 +118,25 @@ export async function findCanonicalWhiteLabelOwnerWorkspaceId(): Promise<
   return canonical.workspaceId;
 }
 
+/**
+ * Canonical white-label config for unauthenticated surfaces (e.g. login) when
+ * INSTANCE_WIDE_WHITE_LABEL is true. Returns null if the flag is off or no
+ * enabled WhiteLabel row exists.
+ */
+export async function getInstanceWideWhiteLabelConfigForLogin(): Promise<WhiteLabelFeatureConfig | null> {
+  if (!config().instanceWideWhiteLabel) {
+    return null;
+  }
+  const owner = await findCanonicalWhiteLabelOwnerWorkspaceId();
+  if (!owner) {
+    return null;
+  }
+  return getFeatureConfig({
+    workspaceId: owner,
+    name: FeatureNamesEnum.WhiteLabel,
+  });
+}
+
 export function whiteLabelMutationAllowedForTargetWorkspace({
   instanceWideWhiteLabel,
   ownerWorkspaceId,
