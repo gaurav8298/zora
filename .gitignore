@@ -150,6 +150,9 @@ mnt/*
 
 .editorconfig
 
+# Cursor IDE
+.cursor/
+
 # Playwright
 .playwright-mcp/
 playwright-report/
