@@ -210,6 +210,8 @@ const BaseRawConfigProps = {
   // workspaces with large event volumes. This makes pruning less precise but
   // avoids expensive JSON parsing during the pruning phase.
   skipPruneJsonExists: Type.Optional(BoolStr),
+  /** When true, one workspace's enabled WhiteLabel feature applies to all workspaces. */
+  instanceWideWhiteLabel: Type.Optional(BoolStr),
   broadcastSendMessagesMaxAttempts: Type.Optional(
     Type.String({ format: "naturalNumber" }),
   ),
@@ -356,6 +358,7 @@ export type Config = Overwrite<
     metricsExportIntervalMs: number;
     batchChunkSize: number;
     skipPruneJsonExists: boolean;
+    instanceWideWhiteLabel: boolean;
     // Cold storage timeouts (ms)
     clickhouseColdStorageRequestTimeout?: number;
     clickhouseColdStorageMaxExecutionTime?: number;
@@ -817,6 +820,7 @@ function parseRawConfig(rawConfig: RawConfig): Config {
       ? parseInt(rawConfig.batchChunkSize)
       : 100,
     skipPruneJsonExists: rawConfig.skipPruneJsonExists !== "false",
+    instanceWideWhiteLabel: rawConfig.instanceWideWhiteLabel === "true",
     broadcastSendMessagesMaxAttempts: parseMaxAttempts(
       rawConfig.broadcastSendMessagesMaxAttempts,
       5,

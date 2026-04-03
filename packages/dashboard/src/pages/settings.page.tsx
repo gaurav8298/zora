@@ -6,6 +6,7 @@ import {
   InfoOutlined,
   Key,
   Mail,
+  PaletteOutlined,
   SimCardDownload,
   SmsOutlined,
   Webhook,
@@ -28,7 +29,7 @@ import {
 } from "@mui/material";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import CodeMirror from "@uiw/react-codemirror";
-import axios from "axios";
+import axios, { isAxiosError } from "axios";
 import { getAdminApiKeys } from "backend-lib/src/adminApiKeys";
 import { getOrCreateWriteKey, getWriteKeys } from "backend-lib/src/auth";
 import { HUBSPOT_INTEGRATION } from "backend-lib/src/constants";
@@ -57,6 +58,7 @@ import {
   EmailProviderType,
   EmptyResponse,
   EphemeralRequestStatus,
+  GetWhiteLabelSettingsResponse,
   IntegrationResource,
   IntegrationType,
   PartialSegmentResource,
@@ -319,6 +321,7 @@ const settingsSectionIds = {
   adminApiKey: "admin-api-key",
   hubspotIntegration: "hubspot-integration",
   workspaceMetadata: "workspace-metadata",
+  whiteLabel: "white-label",
   permissions: "permissions",
 } as const;
 
@@ -431,6 +434,15 @@ function getMenuItems(authMode: string | undefined): MenuItemGroup[] {
           icon: InfoOutlined,
           description: "Copy workspace id to clipboard.",
         },
+        {
+          id: settingsSectionIds.whiteLabel,
+          title: "White labeling",
+          type: "item",
+          url: `/settings#${settingsSectionIds.whiteLabel}`,
+          icon: PaletteOutlined,
+          description:
+            "Customize dashboard title, favicon, and navigation card.",
+        },
       ],
       url: `/settings#${settingsSectionIds.workspaceMetadata}`,
     },
@@ -516,6 +528,25 @@ export const useSettingsStore = create(
 
 function useSettingsStorePick(params: (keyof SettingsContent)[]) {
   return useSettingsStore((store) => pick(store, params));
+}
+
+function readAxiosResponseMessage(error: unknown): string | undefined {
+  if (!isAxiosError(error)) {
+    return undefined;
+  }
+  const raw = error.response?.data;
+  if (typeof raw !== "object" || raw === null || !("message" in raw)) {
+    return undefined;
+  }
+  const msg = Reflect.get(raw, "message");
+  return typeof msg === "string" ? msg : undefined;
+}
+
+function whiteLabelMutationErrorMessage(error: unknown): string {
+  return (
+    readAxiosResponseMessage(error) ??
+    (error instanceof Error ? error.message : "Unknown error")
+  );
 }
 
 function SegmentIoConfig() {
@@ -2438,6 +2469,215 @@ function CreateWorkspaceFromSettings({ workspaceId }: { workspaceId: string }) {
   );
 }
 
+function WhiteLabelMetadataSettings() {
+  const router = useRouter();
+  const { apiBase, workspace } = useAppStorePick(["apiBase", "workspace"]);
+  const { isAdmin } = useWorkspaceCapabilities();
+  const queryClient = useQueryClient();
+
+  const workspaceId =
+    workspace.type === CompletionStatus.Successful ? workspace.value.id : null;
+
+  const [favicon, setFavicon] = useState("");
+  const [title, setTitle] = useState("");
+  const [navCardTitle, setNavCardTitle] = useState("");
+  const [navCardDescription, setNavCardDescription] = useState("");
+  const [navCardIcon, setNavCardIcon] = useState("");
+
+  const whiteLabelQuery = useQuery({
+    queryKey: ["whiteLabelSettings", workspaceId],
+    queryFn: async (): Promise<GetWhiteLabelSettingsResponse> => {
+      const response = await axios.get<GetWhiteLabelSettingsResponse>(
+        `${apiBase}/api/settings/white-label?workspaceId=${workspaceId}`,
+      );
+      return response.data;
+    },
+    enabled: Boolean(workspaceId),
+  });
+
+  useEffect(() => {
+    const c = whiteLabelQuery.data?.config;
+    if (!c) {
+      setFavicon("");
+      setTitle("");
+      setNavCardTitle("");
+      setNavCardDescription("");
+      setNavCardIcon("");
+      return;
+    }
+    setFavicon(c.favicon ?? "");
+    setTitle(c.title ?? "");
+    setNavCardTitle(c.navCardTitle ?? "");
+    setNavCardDescription(c.navCardDescription ?? "");
+    setNavCardIcon(c.navCardIcon ?? "");
+  }, [whiteLabelQuery.data]);
+
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      if (!workspaceId) {
+        return;
+      }
+      await axios.put(`${apiBase}/api/settings/white-label`, {
+        workspaceId,
+        favicon,
+        title,
+        navCardTitle,
+        navCardDescription,
+        navCardIcon,
+      });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ["whiteLabelSettings", workspaceId],
+      });
+      enqueueSnackbar("White label settings saved.", {
+        variant: "success",
+        autoHideDuration: 3000,
+        anchorOrigin: noticeAnchorOrigin,
+      });
+      await router.reload();
+    },
+    onError: (error: unknown) => {
+      enqueueSnackbar(
+        `Could not save white label settings: ${whiteLabelMutationErrorMessage(error)}`,
+        {
+          variant: "error",
+          anchorOrigin: noticeAnchorOrigin,
+        },
+      );
+    },
+  });
+
+  const clearMutation = useMutation({
+    mutationFn: async () => {
+      if (!workspaceId) {
+        return;
+      }
+      await axios.delete(
+        `${apiBase}/api/settings/white-label?workspaceId=${workspaceId}`,
+      );
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ["whiteLabelSettings", workspaceId],
+      });
+      enqueueSnackbar("White label settings cleared.", {
+        variant: "success",
+        autoHideDuration: 3000,
+        anchorOrigin: noticeAnchorOrigin,
+      });
+      await router.reload();
+    },
+    onError: (error: unknown) => {
+      enqueueSnackbar(
+        `Could not clear white label settings: ${whiteLabelMutationErrorMessage(error)}`,
+        {
+          variant: "error",
+          anchorOrigin: noticeAnchorOrigin,
+        },
+      );
+    },
+  });
+
+  if (!workspaceId) {
+    return null;
+  }
+
+  const canEdit = whiteLabelQuery.data?.canEdit ?? false;
+  const fieldsDisabled = !canEdit || whiteLabelQuery.isLoading;
+
+  return (
+    <Stack spacing={2} id={settingsSectionIds.whiteLabel}>
+      <SectionSubHeader
+        title="White labeling"
+        description="Override the dashboard title, favicon, and sidebar navigation card. Leave fields empty to use defaults."
+      />
+      {whiteLabelQuery.data?.instanceWideActive && !canEdit ? (
+        <Typography variant="body2" color="text.secondary">
+          Instance-wide white label is enabled. Only workspace Admins of the
+          workspace that owns the configuration (id{" "}
+          <Box component="span" sx={{ fontFamily: "monospace" }}>
+            {whiteLabelQuery.data.ownerWorkspaceId}
+          </Box>
+          ) can change these settings.
+        </Typography>
+      ) : null}
+      {!isAdmin ? (
+        <Typography variant="body2" color="text.secondary">
+          Only workspace Admins can edit white label settings.
+        </Typography>
+      ) : null}
+      <Stack spacing={2} maxWidth={560}>
+        <TextField
+          label="Browser title"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          disabled={fieldsDisabled}
+          fullWidth
+          size="small"
+        />
+        <TextField
+          label="Favicon URL"
+          value={favicon}
+          onChange={(e) => setFavicon(e.target.value)}
+          disabled={fieldsDisabled}
+          fullWidth
+          size="small"
+          helperText="Absolute URL to a favicon image."
+        />
+        <TextField
+          label="Navigation card title"
+          value={navCardTitle}
+          onChange={(e) => setNavCardTitle(e.target.value)}
+          disabled={fieldsDisabled}
+          fullWidth
+          size="small"
+        />
+        <TextField
+          label="Navigation card description"
+          value={navCardDescription}
+          onChange={(e) => setNavCardDescription(e.target.value)}
+          disabled={fieldsDisabled}
+          fullWidth
+          size="small"
+          multiline
+          minRows={2}
+        />
+        <TextField
+          label="Navigation card icon URL"
+          value={navCardIcon}
+          onChange={(e) => setNavCardIcon(e.target.value)}
+          disabled={fieldsDisabled}
+          fullWidth
+          size="small"
+          helperText="Absolute URL to an image for the sidebar card."
+        />
+        <Stack direction="row" spacing={2}>
+          <LoadingButton
+            variant="contained"
+            disabled={!canEdit}
+            loading={saveMutation.isPending}
+            onClick={() => saveMutation.mutate()}
+          >
+            Save
+          </LoadingButton>
+          <Button
+            color="inherit"
+            disabled={
+              !canEdit ||
+              clearMutation.isPending ||
+              !whiteLabelQuery.data?.enabled
+            }
+            onClick={() => clearMutation.mutate()}
+          >
+            Clear white label
+          </Button>
+        </Stack>
+      </Stack>
+    </Stack>
+  );
+}
+
 function Metadata() {
   const { workspace: workspaceResult } = useAppStorePick(["workspace"]);
   const workspace =
@@ -2476,6 +2716,7 @@ function Metadata() {
           },
         ]}
       />
+      <WhiteLabelMetadataSettings />
       <CreateWorkspaceFromSettings workspaceId={workspace.id} />
     </Stack>
   );

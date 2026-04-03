@@ -4,6 +4,7 @@ import {
   schemaValidate,
   schemaValidateWithErr,
 } from "isomorphic-lib/src/resultHandling/schemaValidation";
+import { omit } from "remeda";
 
 import {
   startComputePropertiesWorkflow,
@@ -19,6 +20,9 @@ import {
   FeatureName,
   FeatureNamesEnum,
   Features,
+  GetWhiteLabelSettingsResponse,
+  UpsertWhiteLabelRequest,
+  WhiteLabelFeatureConfig,
 } from "./types";
 
 export async function getFeature({
@@ -79,6 +83,129 @@ export async function getFeatureConfig<T extends FeatureName>({
   return validated.value;
 }
 
+/**
+ * When INSTANCE_WIDE_WHITE_LABEL is enabled, the canonical owner is the
+ * lexicographically smallest workspaceId among rows with enabled WhiteLabel.
+ */
+export async function findCanonicalWhiteLabelOwnerWorkspaceId(): Promise<
+  string | null
+> {
+  const rows = await db().query.feature.findMany({
+    where: and(
+      eq(dbFeature.name, FeatureNamesEnum.WhiteLabel),
+      eq(dbFeature.enabled, true),
+    ),
+  });
+  if (rows.length === 0) {
+    return null;
+  }
+  const sorted = [...rows].sort((a, b) =>
+    a.workspaceId.localeCompare(b.workspaceId),
+  );
+  const canonical = sorted[0];
+  if (!canonical) {
+    return null;
+  }
+  if (sorted.length > 1) {
+    logger().warn(
+      {
+        count: sorted.length,
+        canonicalWorkspaceId: canonical.workspaceId,
+      },
+      "Multiple enabled WhiteLabel features; using canonical workspace (min workspace id)",
+    );
+  }
+  return canonical.workspaceId;
+}
+
+export function whiteLabelMutationAllowedForTargetWorkspace({
+  instanceWideWhiteLabel,
+  ownerWorkspaceId,
+  targetWorkspaceId,
+}: {
+  instanceWideWhiteLabel: boolean;
+  ownerWorkspaceId: string | null;
+  targetWorkspaceId: string;
+}): boolean {
+  if (!instanceWideWhiteLabel) {
+    return true;
+  }
+  if (ownerWorkspaceId === null) {
+    return true;
+  }
+  return targetWorkspaceId === ownerWorkspaceId;
+}
+
+export async function getWhiteLabelSettingsForApi({
+  workspaceId,
+  requesterIsAdmin,
+}: {
+  workspaceId: string;
+  requesterIsAdmin: boolean;
+}): Promise<GetWhiteLabelSettingsResponse> {
+  const { instanceWideWhiteLabel } = config();
+  const ownerWorkspaceId = instanceWideWhiteLabel
+    ? await findCanonicalWhiteLabelOwnerWorkspaceId()
+    : null;
+  const instanceWideActive =
+    instanceWideWhiteLabel && ownerWorkspaceId !== null;
+
+  let effectiveConfig: WhiteLabelFeatureConfig | null;
+  if (instanceWideActive && ownerWorkspaceId) {
+    effectiveConfig = await getFeatureConfig({
+      workspaceId: ownerWorkspaceId,
+      name: FeatureNamesEnum.WhiteLabel,
+    });
+  } else {
+    effectiveConfig = await getFeatureConfig({
+      workspaceId,
+      name: FeatureNamesEnum.WhiteLabel,
+    });
+  }
+
+  const canEdit =
+    requesterIsAdmin &&
+    (!instanceWideActive || workspaceId === ownerWorkspaceId);
+
+  return {
+    config: effectiveConfig,
+    enabled: effectiveConfig !== null,
+    instanceWideActive,
+    ownerWorkspaceId,
+    canEdit,
+  };
+}
+
+const whiteLabelFieldKeys = [
+  "favicon",
+  "title",
+  "navCardTitle",
+  "navCardDescription",
+  "navCardIcon",
+] as const satisfies readonly (keyof Omit<WhiteLabelFeatureConfig, "type">)[];
+
+export function buildWhiteLabelConfigFromUpsertRequest(
+  existing: WhiteLabelFeatureConfig | null,
+  body: UpsertWhiteLabelRequest,
+): WhiteLabelFeatureConfig {
+  let next: WhiteLabelFeatureConfig = {
+    type: FeatureNamesEnum.WhiteLabel,
+    ...(existing ?? {}),
+  };
+  for (const key of whiteLabelFieldKeys) {
+    if (!(key in body)) {
+      continue;
+    }
+    const v = body[key];
+    if (v === "") {
+      next = omit(next, [key]);
+    } else if (v !== undefined) {
+      next[key] = v;
+    }
+  }
+  return next;
+}
+
 export async function getFeatures({
   names,
   workspaceId,
@@ -93,7 +220,7 @@ export async function getFeatures({
   const features = await db().query.feature.findMany({
     where: and(...conditions),
   });
-  return features.reduce<FeatureMap>((acc, feature) => {
+  const map = features.reduce<FeatureMap>((acc, feature) => {
     const validated = schemaValidate(feature.name, FeatureName);
     if (validated.isErr()) {
       return acc;
@@ -110,6 +237,27 @@ export async function getFeatures({
     acc[validated.value] = feature.enabled;
     return acc;
   }, {});
+
+  const { instanceWideWhiteLabel } = config();
+  const includeWhiteLabel =
+    !names || names.includes(FeatureNamesEnum.WhiteLabel);
+  if (instanceWideWhiteLabel && includeWhiteLabel) {
+    const owner = await findCanonicalWhiteLabelOwnerWorkspaceId();
+    if (owner) {
+      const wl = await getFeatureConfig({
+        workspaceId: owner,
+        name: FeatureNamesEnum.WhiteLabel,
+      });
+      if (wl) {
+        map[FeatureNamesEnum.WhiteLabel] = wl;
+      } else {
+        // eslint-disable-next-line @typescript-eslint/no-dynamic-delete -- drop optional feature key
+        delete map[FeatureNamesEnum.WhiteLabel];
+      }
+    }
+  }
+
+  return map;
 }
 
 export async function addFeatures({

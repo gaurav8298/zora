@@ -2,8 +2,18 @@
 import { TypeBoxTypeProvider } from "@fastify/type-provider-typebox";
 import { Type } from "@sinclair/typebox";
 import { getOrCreateWriteKey, getWriteKeys } from "backend-lib/src/auth";
+import backendConfig from "backend-lib/src/config";
 import { db, upsert } from "backend-lib/src/db";
 import * as schema from "backend-lib/src/db/schema";
+import {
+  addFeatures,
+  buildWhiteLabelConfigFromUpsertRequest,
+  findCanonicalWhiteLabelOwnerWorkspaceId,
+  getFeatureConfig,
+  getWhiteLabelSettingsForApi,
+  removeFeatures,
+  whiteLabelMutationAllowedForTargetWorkspace,
+} from "backend-lib/src/features";
 import { upsertEmailProvider } from "backend-lib/src/messaging/email";
 import { upsertSmsProvider } from "backend-lib/src/messaging/sms";
 import { and, eq } from "drizzle-orm";
@@ -16,8 +26,12 @@ import {
   DefaultEmailProviderResource,
   DefaultSmsProviderResource,
   DeleteDataSourceConfigurationRequest,
+  DeleteWhiteLabelRequest,
   DeleteWriteKeyResource,
   EmptyResponse,
+  FeatureNamesEnum,
+  GetWhiteLabelSettingsRequest,
+  GetWhiteLabelSettingsResponse,
   ListDataSourceConfigurationRequest,
   ListDataSourceConfigurationResponse,
   ListWriteKeyRequest,
@@ -28,14 +42,165 @@ import {
   UpsertDefaultEmailProviderRequest,
   UpsertEmailProviderRequest,
   UpsertSmsProviderRequest,
+  UpsertWhiteLabelRequest,
   UpsertWriteKeyResource,
   WriteKeyResource,
 } from "isomorphic-lib/src/types";
+import { requireWorkspaceAdmin } from "isomorphic-lib/src/workspaceRoles";
 
 import { denyUnlessAtLeastRole } from "../buildApp/workspaceRoleGuard";
 
 // eslint-disable-next-line @typescript-eslint/require-await
 export default async function settingsController(fastify: FastifyInstance) {
+  fastify.withTypeProvider<TypeBoxTypeProvider>().get(
+    "/white-label",
+    {
+      schema: {
+        description: "Get white-label settings for the workspace",
+        tags: ["Settings"],
+        querystring: GetWhiteLabelSettingsRequest,
+        response: {
+          200: GetWhiteLabelSettingsResponse,
+        },
+      },
+    },
+    async (request, reply) => {
+      const workspace = request.requestContext.get("workspace");
+      if (!workspace?.id) {
+        return reply.status(403).send();
+      }
+      if (request.query.workspaceId !== workspace.id) {
+        return reply.status(403).send();
+      }
+      const memberRoles = request.requestContext.get("memberRoles") ?? [];
+      const requesterIsAdmin = requireWorkspaceAdmin({
+        memberRoles,
+        workspaceId: workspace.id,
+      }).isOk();
+      const payload = await getWhiteLabelSettingsForApi({
+        workspaceId: workspace.id,
+        requesterIsAdmin,
+      });
+      return reply.status(200).send(payload);
+    },
+  );
+
+  fastify.withTypeProvider<TypeBoxTypeProvider>().put(
+    "/white-label",
+    {
+      schema: {
+        description: "Create or update white-label settings",
+        tags: ["Settings"],
+        body: UpsertWhiteLabelRequest,
+        response: {
+          200: GetWhiteLabelSettingsResponse,
+          400: BadRequestResponse,
+          403: Type.Object({ message: Type.String() }),
+        },
+      },
+    },
+    async (request, reply) => {
+      if (denyUnlessAtLeastRole(request, reply, RoleEnum.Admin)) {
+        return;
+      }
+      const workspace = request.requestContext.get("workspace");
+      if (!workspace?.id) {
+        return reply.status(403).send();
+      }
+      if (request.body.workspaceId !== workspace.id) {
+        return reply.status(400).send({
+          message: "workspaceId does not match the active workspace.",
+        });
+      }
+      const cfg = backendConfig();
+      const ownerWorkspaceId = cfg.instanceWideWhiteLabel
+        ? await findCanonicalWhiteLabelOwnerWorkspaceId()
+        : null;
+      if (
+        !whiteLabelMutationAllowedForTargetWorkspace({
+          instanceWideWhiteLabel: cfg.instanceWideWhiteLabel,
+          ownerWorkspaceId,
+          targetWorkspaceId: workspace.id,
+        })
+      ) {
+        return reply.status(403).send({
+          message:
+            "Instance white label is managed from another workspace. Only a workspace Admin there can change it.",
+        });
+      }
+      const existing = await getFeatureConfig({
+        workspaceId: workspace.id,
+        name: FeatureNamesEnum.WhiteLabel,
+      });
+      const nextConfig = buildWhiteLabelConfigFromUpsertRequest(
+        existing,
+        request.body,
+      );
+      await addFeatures({
+        workspaceId: workspace.id,
+        features: [nextConfig],
+      });
+      const memberRoles = request.requestContext.get("memberRoles") ?? [];
+      const requesterIsAdmin = requireWorkspaceAdmin({
+        memberRoles,
+        workspaceId: workspace.id,
+      }).isOk();
+      const payload = await getWhiteLabelSettingsForApi({
+        workspaceId: workspace.id,
+        requesterIsAdmin,
+      });
+      return reply.status(200).send(payload);
+    },
+  );
+
+  fastify.withTypeProvider<TypeBoxTypeProvider>().delete(
+    "/white-label",
+    {
+      schema: {
+        description: "Remove white-label settings for the workspace",
+        tags: ["Settings"],
+        querystring: DeleteWhiteLabelRequest,
+        response: {
+          204: EmptyResponse,
+          403: Type.Object({ message: Type.String() }),
+        },
+      },
+    },
+    async (request, reply) => {
+      if (denyUnlessAtLeastRole(request, reply, RoleEnum.Admin)) {
+        return;
+      }
+      const workspace = request.requestContext.get("workspace");
+      if (!workspace?.id) {
+        return reply.status(403).send();
+      }
+      if (request.query.workspaceId !== workspace.id) {
+        return reply.status(403).send();
+      }
+      const cfg = backendConfig();
+      const ownerWorkspaceId = cfg.instanceWideWhiteLabel
+        ? await findCanonicalWhiteLabelOwnerWorkspaceId()
+        : null;
+      if (
+        !whiteLabelMutationAllowedForTargetWorkspace({
+          instanceWideWhiteLabel: cfg.instanceWideWhiteLabel,
+          ownerWorkspaceId,
+          targetWorkspaceId: workspace.id,
+        })
+      ) {
+        return reply.status(403).send({
+          message:
+            "Instance white label is managed from another workspace. Only a workspace Admin there can change it.",
+        });
+      }
+      await removeFeatures({
+        workspaceId: workspace.id,
+        names: [FeatureNamesEnum.WhiteLabel],
+      });
+      return reply.status(204).send();
+    },
+  );
+
   fastify.withTypeProvider<TypeBoxTypeProvider>().get(
     "/data-sources",
     {
