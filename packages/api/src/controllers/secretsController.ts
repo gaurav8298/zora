@@ -9,9 +9,12 @@ import {
   EmptyResponse,
   JSONValue,
   ListSecretsRequest,
+  RoleEnum,
   SecretResource,
   UpsertSecretRequest,
 } from "isomorphic-lib/src/types";
+
+import { denyUnlessAtLeastRole } from "../buildApp/workspaceRoleGuard";
 
 // eslint-disable-next-line @typescript-eslint/require-await
 export default async function secretsController(fastify: FastifyInstance) {
@@ -28,6 +31,9 @@ export default async function secretsController(fastify: FastifyInstance) {
       },
     },
     async (request, reply) => {
+      if (denyUnlessAtLeastRole(request, reply, RoleEnum.WorkspaceManager)) {
+        return;
+      }
       const { workspaceId, names } = request.query;
 
       const conditions: SQL[] = [eq(schema.secret.workspaceId, workspaceId)];
@@ -68,6 +74,9 @@ export default async function secretsController(fastify: FastifyInstance) {
       },
     },
     async (request, reply) => {
+      if (denyUnlessAtLeastRole(request, reply, RoleEnum.WorkspaceManager)) {
+        return;
+      }
       const { workspaceId, name, value, configValue } = request.body;
       await db().transaction(async (pTx) => {
         const secret = await pTx.query.secret.findFirst({
@@ -129,6 +138,9 @@ export default async function secretsController(fastify: FastifyInstance) {
       },
     },
     async (request, reply) => {
+      if (denyUnlessAtLeastRole(request, reply, RoleEnum.WorkspaceManager)) {
+        return;
+      }
       const { workspaceId, id } = request.query;
       const result = await db()
         .delete(schema.secret)

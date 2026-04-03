@@ -8,6 +8,7 @@ import {
   Home,
   MoreVert as MoreVertIcon,
   UnfoldMore,
+  VpnKey,
 } from "@mui/icons-material";
 import {
   Alert,
@@ -61,13 +62,16 @@ import { enqueueSnackbar } from "notistack";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useImmer } from "use-immer";
 
+import { formatForbiddenActionNotice } from "../lib/forbiddenActionNotice";
 import { noticeAnchorOrigin } from "../lib/notices";
 import {
+  useAdminMemberPasswordMutation,
   useCreatePermissionMutation,
   useDeletePermissionMutation,
   useUpdatePermissionMutation,
 } from "../lib/usePermissionsMutations";
 import { usePermissionsQuery } from "../lib/usePermissionsQuery";
+import { useWorkspaceCapabilities } from "../lib/useWorkspaceCapabilities";
 import { GreyButton } from "./greyButtonStyle";
 
 interface PermissionDialogProps {
@@ -75,6 +79,7 @@ interface PermissionDialogProps {
   onClose: () => void;
   memberWithRole?: WorkspaceMemberWithRoles;
   isEdit?: boolean;
+  readOnly?: boolean;
 }
 
 function PermissionDialog({
@@ -82,11 +87,15 @@ function PermissionDialog({
   onClose,
   memberWithRole,
   isEdit = false,
+  readOnly = false,
 }: PermissionDialogProps) {
   const [email, setEmail] = useState(memberWithRole?.member.email ?? "");
   const [role, setRole] = useState<Role>(
     memberWithRole?.roles[0]?.role ?? RoleEnum.Viewer,
   );
+  const [initialPassword, setInitialPassword] = useState("");
+  const [initialPasswordConfirm, setInitialPasswordConfirm] = useState("");
+  const { workspaceRoleLabel } = useWorkspaceCapabilities();
 
   useEffect(() => {
     if (!open) {
@@ -94,21 +103,31 @@ function PermissionDialog({
     }
     setEmail(memberWithRole?.member.email ?? "");
     setRole(memberWithRole?.roles[0]?.role ?? RoleEnum.Viewer);
+    setInitialPassword("");
+    setInitialPasswordConfirm("");
   }, [open, memberWithRole]);
 
   const createMutation = useCreatePermissionMutation({
     onSuccess: () => {
-      enqueueSnackbar("Permission created successfully", {
+      enqueueSnackbar("User added successfully", {
         variant: "success",
         anchorOrigin: noticeAnchorOrigin,
       });
       onClose();
       setEmail("");
       setRole(RoleEnum.Viewer);
+      setInitialPassword("");
+      setInitialPasswordConfirm("");
     },
     onError: (error) => {
+      const forbidden = formatForbiddenActionNotice(
+        error,
+        "Add user",
+        workspaceRoleLabel,
+      );
       enqueueSnackbar(
-        `Failed to create permission: ${error.response?.status === 400 ? "Member already has a role" : error.message}`,
+        forbidden ??
+          `Failed to add user: ${error.response?.status === 400 ? "Member already has a role" : error.message}`,
         {
           variant: "error",
           anchorOrigin: noticeAnchorOrigin,
@@ -119,14 +138,19 @@ function PermissionDialog({
 
   const updateMutation = useUpdatePermissionMutation({
     onSuccess: () => {
-      enqueueSnackbar("Permission updated successfully", {
+      enqueueSnackbar("User updated successfully", {
         variant: "success",
         anchorOrigin: noticeAnchorOrigin,
       });
       onClose();
     },
     onError: (err) => {
-      enqueueSnackbar(`Failed to update permission: ${err.message}`, {
+      const forbidden = formatForbiddenActionNotice(
+        err,
+        "Update user role",
+        workspaceRoleLabel,
+      );
+      enqueueSnackbar(forbidden ?? `Failed to update user: ${err.message}`, {
         variant: "error",
         anchorOrigin: noticeAnchorOrigin,
       });
@@ -134,31 +158,53 @@ function PermissionDialog({
   });
 
   const handleSubmit = () => {
+    if (readOnly) {
+      return;
+    }
     if (isEdit && memberWithRole) {
       updateMutation.mutate({
         email: memberWithRole.member.email,
         role,
       });
-    } else {
+      return;
+    }
+
+    const pw = initialPassword.trim();
+    const pw2 = initialPasswordConfirm.trim();
+    if (pw.length > 0 || pw2.length > 0) {
+      if (pw !== pw2) {
+        enqueueSnackbar("Passwords do not match.", {
+          variant: "error",
+          anchorOrigin: noticeAnchorOrigin,
+        });
+        return;
+      }
       createMutation.mutate({
         email,
         role,
+        initialPassword: pw,
       });
+      return;
     }
+
+    createMutation.mutate({
+      email,
+      role,
+    });
   };
 
   const isLoading = createMutation.isPending || updateMutation.isPending;
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
-      <DialogTitle>{isEdit ? "Edit Permission" : "Add Permission"}</DialogTitle>
+      <DialogTitle>{isEdit ? "Edit user" : "Add User"}</DialogTitle>
       <DialogContent>
         <Box sx={{ display: "flex", flexDirection: "column", gap: 2, pt: 1 }}>
           <TextField
             label="Email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            disabled={isEdit}
+            disabled={isEdit || readOnly}
             fullWidth
             required
           />
@@ -167,6 +213,7 @@ function PermissionDialog({
             <Select
               value={role}
               label="Role"
+              disabled={readOnly}
               // eslint-disable-next-line @typescript-eslint/consistent-type-assertions
               onChange={(e) => setRole(e.target.value as Role)}
             >
@@ -192,6 +239,29 @@ function PermissionDialog({
               {WORKSPACE_ROLE_INFO[role].summary}
             </FormHelperText>
           </FormControl>
+          {!isEdit ? (
+            <>
+              <TextField
+                label="Initial password (optional)"
+                type="password"
+                value={initialPassword}
+                onChange={(e) => setInitialPassword(e.target.value)}
+                disabled={readOnly}
+                fullWidth
+                autoComplete="new-password"
+                helperText="Leave blank for SSO-only; the user can set a password from My Profile."
+              />
+              <TextField
+                label="Confirm initial password"
+                type="password"
+                value={initialPasswordConfirm}
+                onChange={(e) => setInitialPasswordConfirm(e.target.value)}
+                disabled={readOnly}
+                fullWidth
+                autoComplete="new-password"
+              />
+            </>
+          ) : null}
         </Box>
       </DialogContent>
       <DialogActions>
@@ -201,9 +271,116 @@ function PermissionDialog({
         <Button
           onClick={handleSubmit}
           variant="contained"
-          disabled={!email || isLoading}
+          disabled={readOnly || !email || isLoading}
         >
-          {isEdit ? "Update" : "Create"}
+          {isEdit ? "Update" : "Add user"}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+interface ResetPasswordDialogProps {
+  open: boolean;
+  onClose: () => void;
+  email: string;
+}
+
+function ResetPasswordDialog({
+  open,
+  onClose,
+  email,
+}: ResetPasswordDialogProps) {
+  const [newPassword, setNewPassword] = useState("");
+  const [newPasswordConfirm, setNewPasswordConfirm] = useState("");
+  const { workspaceRoleLabel } = useWorkspaceCapabilities();
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    setNewPassword("");
+    setNewPasswordConfirm("");
+  }, [open, email]);
+
+  const resetMutation = useAdminMemberPasswordMutation({
+    onSuccess: () => {
+      enqueueSnackbar("Password reset for user.", {
+        variant: "success",
+        anchorOrigin: noticeAnchorOrigin,
+      });
+      onClose();
+    },
+    onError: (err) => {
+      const forbidden = formatForbiddenActionNotice(
+        err,
+        "Reset member password",
+        workspaceRoleLabel,
+      );
+      enqueueSnackbar(forbidden ?? `Failed to reset password: ${err.message}`, {
+        variant: "error",
+        anchorOrigin: noticeAnchorOrigin,
+      });
+    },
+  });
+
+  const handleSubmit = () => {
+    if (newPassword !== newPasswordConfirm) {
+      enqueueSnackbar("Passwords do not match.", {
+        variant: "error",
+        anchorOrigin: noticeAnchorOrigin,
+      });
+      return;
+    }
+    resetMutation.mutate({
+      email,
+      newPassword,
+      newPasswordConfirm,
+    });
+  };
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+      <DialogTitle>Reset password</DialogTitle>
+      <DialogContent>
+        <Stack spacing={2} sx={{ pt: 1 }}>
+          <Typography variant="body2" color="text.secondary">
+            Set a new password for{" "}
+            <Box component="span" sx={{ fontFamily: "monospace" }}>
+              {email}
+            </Box>
+            .
+          </Typography>
+          <TextField
+            label="New password"
+            type="password"
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+            fullWidth
+            autoComplete="new-password"
+          />
+          <TextField
+            label="Confirm new password"
+            type="password"
+            value={newPasswordConfirm}
+            onChange={(e) => setNewPasswordConfirm(e.target.value)}
+            fullWidth
+            autoComplete="new-password"
+          />
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose} disabled={resetMutation.isPending}>
+          Cancel
+        </Button>
+        <Button
+          onClick={handleSubmit}
+          variant="contained"
+          disabled={
+            !newPassword || !newPasswordConfirm || resetMutation.isPending
+          }
+        >
+          Reset password
         </Button>
       </DialogActions>
     </Dialog>
@@ -335,8 +512,11 @@ function ActionsCell({
   const memberWithRole = row.original;
 
   const onEdit = table.options.meta?.onEdit;
+  const onResetPassword = table.options.meta?.onResetPassword;
   const onDelete = table.options.meta?.onDelete;
   const isDeleting = table.options.meta?.isDeleting ?? false;
+  const canManagePermissions =
+    table.options.meta?.canManagePermissions ?? false;
 
   const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
   const open = Boolean(anchorEl);
@@ -356,12 +536,23 @@ function ActionsCell({
     handleClose();
   };
 
+  const handleResetPassword = () => {
+    if (onResetPassword) {
+      onResetPassword(memberWithRole);
+    }
+    handleClose();
+  };
+
   const handleDelete = () => {
     if (onDelete) {
       onDelete(memberWithRole);
     }
     handleClose();
   };
+
+  if (!canManagePermissions) {
+    return null;
+  }
 
   return (
     <>
@@ -396,6 +587,10 @@ function ActionsCell({
           <Edit fontSize="small" sx={{ mr: 1 }} />
           Edit
         </MenuItem>
+        <MenuItem onClick={handleResetPassword}>
+          <VpnKey fontSize="small" sx={{ mr: 1 }} />
+          Reset password
+        </MenuItem>
         <MenuItem
           onClick={handleDelete}
           disabled={isDeleting}
@@ -410,7 +605,10 @@ function ActionsCell({
 }
 
 export function PermissionsTable() {
+  const { isAdmin, workspaceRoleLabel } = useWorkspaceCapabilities();
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [resetDialogOpen, setResetDialogOpen] = useState(false);
+  const [resetEmail, setResetEmail] = useState("");
   const [editingMember, setEditingMember] = useState<
     WorkspaceMemberWithRoles | undefined
   >();
@@ -423,13 +621,18 @@ export function PermissionsTable() {
 
   const deleteMutation = useDeletePermissionMutation({
     onSuccess: () => {
-      enqueueSnackbar("Permission deleted successfully", {
+      enqueueSnackbar("User removed from workspace", {
         variant: "success",
         anchorOrigin: noticeAnchorOrigin,
       });
     },
     onError: (err) => {
-      enqueueSnackbar(`Failed to delete permission: ${err.message}`, {
+      const forbidden = formatForbiddenActionNotice(
+        err,
+        "Remove user",
+        workspaceRoleLabel,
+      );
+      enqueueSnackbar(forbidden ?? `Failed to remove user: ${err.message}`, {
         variant: "error",
         anchorOrigin: noticeAnchorOrigin,
       });
@@ -448,6 +651,14 @@ export function PermissionsTable() {
       });
     },
     [deleteMutation],
+  );
+
+  const handleResetPassword = useCallback(
+    (memberWithRole: WorkspaceMemberWithRoles) => {
+      setResetEmail(memberWithRole.member.email);
+      setResetDialogOpen(true);
+    },
+    [],
   );
 
   const handleCloseDialog = useCallback(() => {
@@ -521,8 +732,10 @@ export function PermissionsTable() {
     getSortedRowModel: getSortedRowModel(),
     meta: {
       onEdit: handleEdit,
+      onResetPassword: handleResetPassword,
       onDelete: handleDelete,
       isDeleting: deleteMutation.isPending,
+      canManagePermissions: isAdmin,
     },
   });
 
@@ -551,8 +764,15 @@ export function PermissionsTable() {
         sx={{ height: "48px" }}
       >
         <Typography variant="h6">Workspace Permissions</Typography>
-        <GreyButton startIcon={<Add />} onClick={() => setDialogOpen(true)}>
-          Add Permission
+        <GreyButton
+          startIcon={<Add />}
+          disabled={!isAdmin}
+          onClick={() => {
+            setEditingMember(undefined);
+            setDialogOpen(true);
+          }}
+        >
+          Add User
         </GreyButton>
       </Stack>
 
@@ -642,7 +862,7 @@ export function PermissionsTable() {
                     color: "text.secondary",
                   }}
                 >
-                  <Typography variant="body2">No permissions found</Typography>
+                  <Typography variant="body2">No users found</Typography>
                 </TableCell>
               </TableRow>
             )}
@@ -655,6 +875,15 @@ export function PermissionsTable() {
         onClose={handleCloseDialog}
         memberWithRole={editingMember}
         isEdit={!!editingMember}
+        readOnly={!isAdmin}
+      />
+      <ResetPasswordDialog
+        open={resetDialogOpen}
+        onClose={() => {
+          setResetDialogOpen(false);
+          setResetEmail("");
+        }}
+        email={resetEmail}
       />
     </Stack>
   );
@@ -665,7 +894,9 @@ declare module "@tanstack/react-table" {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   interface TableMeta<TData = unknown> {
     onEdit?: (memberWithRole: WorkspaceMemberWithRoles) => void;
+    onResetPassword?: (memberWithRole: WorkspaceMemberWithRoles) => void;
     onDelete?: (memberWithRole: WorkspaceMemberWithRoles) => void;
     isDeleting?: boolean;
+    canManagePermissions?: boolean;
   }
 }

@@ -27,6 +27,7 @@ import { useImmer } from "use-immer";
 import apiRequestHandlerFactory from "../lib/apiRequestHandlerFactory";
 import { useAppStorePick } from "../lib/appStore";
 import { copyInputProps } from "../lib/copyToClipboard";
+import { useWorkspaceCapabilities } from "../lib/useWorkspaceCapabilities";
 import DeleteDialog from "./confirmDeleteDialog";
 
 enum ModalStateType {
@@ -55,6 +56,8 @@ interface TableState {
 
 export default function AdminApiKeyTable() {
   const theme = useTheme();
+  const { isWorkspaceManagerOrAbove, workspaceRoleLabel } =
+    useWorkspaceCapabilities();
   const {
     adminApiKeys,
     apiBase,
@@ -91,6 +94,7 @@ export default function AdminApiKeyTable() {
 
   const createKey = useCallback(() => {
     if (
+      !isWorkspaceManagerOrAbove ||
       workspace.type !== CompletionStatus.Successful ||
       modalState?.type !== ModalStateType.Naming
     ) {
@@ -100,6 +104,8 @@ export default function AdminApiKeyTable() {
       request: modalState.createRequest,
       onFailureNoticeHandler: () =>
         `Failed to create API key: ${modalState.newName}`,
+      forbiddenAction: "Create admin API key",
+      workspaceRoleLabel,
       requestConfig: {
         method: "POST",
         url: `${apiBase}/api/admin-keys`,
@@ -133,10 +139,21 @@ export default function AdminApiKeyTable() {
         });
       },
     })();
-  }, [modalState, setState, workspace, upsertAdminApiKey, apiBase]);
+  }, [
+    isWorkspaceManagerOrAbove,
+    modalState,
+    setState,
+    workspace,
+    upsertAdminApiKey,
+    apiBase,
+    workspaceRoleLabel,
+  ]);
   const deleteKey = useCallback(
     (id: string) => {
-      if (workspace.type !== CompletionStatus.Successful) {
+      if (
+        !isWorkspaceManagerOrAbove ||
+        workspace.type !== CompletionStatus.Successful
+      ) {
         return;
       }
       const deleteRequest = deleteRequests.get(id) ?? {
@@ -145,6 +162,8 @@ export default function AdminApiKeyTable() {
       apiRequestHandlerFactory({
         request: deleteRequest,
         onFailureNoticeHandler: () => "Failed to delete API key.",
+        forbiddenAction: "Delete admin API key",
+        workspaceRoleLabel,
         responseSchema: EmptyResponse,
         requestConfig: {
           method: "DELETE",
@@ -167,7 +186,15 @@ export default function AdminApiKeyTable() {
         },
       })();
     },
-    [deleteAdminApiKey, deleteRequests, setState, workspace, apiBase],
+    [
+      deleteAdminApiKey,
+      deleteRequests,
+      isWorkspaceManagerOrAbove,
+      setState,
+      workspace,
+      apiBase,
+      workspaceRoleLabel,
+    ],
   );
 
   let dialogContent: React.ReactNode = null;
@@ -249,6 +276,7 @@ export default function AdminApiKeyTable() {
       >
         <Button
           variant="outlined"
+          disabled={!isWorkspaceManagerOrAbove}
           onClick={() => {
             setState((draft) => {
               draft.modalState = {
@@ -314,8 +342,9 @@ export default function AdminApiKeyTable() {
               renderCell: (params) => (
                 <DeleteDialog
                   disabled={
+                    !isWorkspaceManagerOrAbove ||
                     deleteRequests.get(params.row.id)?.type ===
-                    CompletionStatus.InProgress
+                      CompletionStatus.InProgress
                   }
                   title={`Delete Admin API Key ${params.row.name}`}
                   message={`Are you sure you want to delete ${params.row.name}?`}
