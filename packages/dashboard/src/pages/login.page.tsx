@@ -1,10 +1,23 @@
-import { Box, Button, Stack, TextField, Typography, useTheme } from "@mui/material";
 import LoadingButton from "@mui/lab/LoadingButton";
+import {
+  Box,
+  Button,
+  Stack,
+  TextField,
+  Typography,
+  useTheme,
+} from "@mui/material";
 import backendConfig from "backend-lib/src/config";
+import { getInstanceWideWhiteLabelConfigForLogin } from "backend-lib/src/features";
 import { getRequestContext } from "backend-lib/src/requestContext";
 import { serialize } from "cookie";
 import { OAUTH_COOKIE_NAME } from "isomorphic-lib/src/constants";
-import type { AuthLoginMethodsResponse } from "isomorphic-lib/src/types";
+import { schemaValidateWithErr } from "isomorphic-lib/src/resultHandling/schemaValidation";
+import {
+  type AuthLoginMethodsResponse,
+  AuthLoginMethodsResponse as AuthLoginMethodsResponseSchema,
+  type WhiteLabelFeatureConfig,
+} from "isomorphic-lib/src/types";
 import { GetServerSideProps, NextPage } from "next";
 import Head from "next/head";
 import Link from "next/link";
@@ -136,10 +149,14 @@ export const getServerSideProps: GetServerSideProps<LoginPageProps> = async ({
     };
   }
 
+  const loginInstanceWideBranding =
+    await getInstanceWideWhiteLabelConfigForLogin();
+
   return {
     props: {
       signedOut: parseSignedOutFlag(query.signedOut),
       oidcConfigured,
+      loginInstanceWideBranding,
     },
   };
 };
@@ -147,11 +164,13 @@ export const getServerSideProps: GetServerSideProps<LoginPageProps> = async ({
 interface LoginPageProps {
   signedOut: boolean;
   oidcConfigured: boolean;
+  loginInstanceWideBranding: WhiteLabelFeatureConfig | null;
 }
 
 const LoginPage: NextPage<LoginPageProps> = function LoginPage({
   signedOut,
   oidcConfigured,
+  loginInstanceWideBranding,
 }) {
   const theme = useTheme();
   const router = useRouter();
@@ -187,7 +206,16 @@ const LoginPage: NextPage<LoginPageProps> = function LoginPage({
         setError("Could not continue. Try again.");
         return;
       }
-      const data = (await r.json()) as AuthLoginMethodsResponse;
+      const raw: unknown = await r.json();
+      const validated = schemaValidateWithErr(
+        raw,
+        AuthLoginMethodsResponseSchema,
+      );
+      if (validated.isErr()) {
+        setError("Could not continue. Try again.");
+        return;
+      }
+      const data = validated.value;
       setMethods(data);
       if (data.passwordEnabled) {
         setStep("password");
@@ -236,7 +264,14 @@ const LoginPage: NextPage<LoginPageProps> = function LoginPage({
   return (
     <>
       <Head>
-        <title>Sign in — Dittofeed</title>
+        <title>
+          {loginInstanceWideBranding?.title
+            ? loginInstanceWideBranding.title
+            : "Sign in — Dittofeed"}
+        </title>
+        {loginInstanceWideBranding?.favicon ? (
+          <link rel="icon" href={loginInstanceWideBranding.favicon} />
+        ) : null}
       </Head>
       <main>
         <Stack
@@ -245,6 +280,51 @@ const LoginPage: NextPage<LoginPageProps> = function LoginPage({
           justifyContent="center"
           sx={{ width: "100%", minHeight: "100vh", p: 2 }}
         >
+          {loginInstanceWideBranding &&
+          (loginInstanceWideBranding.navCardIcon ||
+            loginInstanceWideBranding.navCardTitle ||
+            loginInstanceWideBranding.navCardDescription) ? (
+            <Stack
+              alignItems="center"
+              spacing={1.5}
+              sx={{ mb: 3, maxWidth: 420, width: "100%" }}
+            >
+              <Stack
+                direction="row"
+                spacing={2}
+                alignItems="center"
+                justifyContent="center"
+              >
+                {loginInstanceWideBranding.navCardIcon ? (
+                  <Box
+                    component="img"
+                    src={loginInstanceWideBranding.navCardIcon}
+                    alt=""
+                    sx={{
+                      width: 56,
+                      height: 56,
+                      objectFit: "contain",
+                      flexShrink: 0,
+                    }}
+                  />
+                ) : null}
+                {loginInstanceWideBranding.navCardTitle ? (
+                  <Typography variant="h5" component="h2" fontWeight={600}>
+                    {loginInstanceWideBranding.navCardTitle}
+                  </Typography>
+                ) : null}
+              </Stack>
+              {loginInstanceWideBranding.navCardDescription ? (
+                <Typography
+                  variant="body2"
+                  color="text.secondary"
+                  sx={{ textAlign: "center", width: "100%" }}
+                >
+                  {loginInstanceWideBranding.navCardDescription}
+                </Typography>
+              ) : null}
+            </Stack>
+          ) : null}
           <Box
             sx={{
               backgroundColor: "background.paper",
@@ -364,7 +444,7 @@ const LoginPage: NextPage<LoginPageProps> = function LoginPage({
             {step === "password" &&
             oidcConfigured &&
             methods?.oidcEnabled &&
-            loadingMethods === false ? (
+            !loadingMethods ? (
               <Stack spacing={1} sx={{ mt: 2 }}>
                 <Typography variant="caption" color="text.secondary">
                   Or use your identity provider instead.

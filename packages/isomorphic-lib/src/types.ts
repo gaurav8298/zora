@@ -5231,6 +5231,44 @@ export const WhiteLabelFeatureConfig = Type.Object({
 
 export type WhiteLabelFeatureConfig = Static<typeof WhiteLabelFeatureConfig>;
 
+export const GetWhiteLabelSettingsRequest = Type.Object({
+  workspaceId: Type.String(),
+});
+
+export type GetWhiteLabelSettingsRequest = Static<
+  typeof GetWhiteLabelSettingsRequest
+>;
+
+export const GetWhiteLabelSettingsResponse = Type.Object({
+  config: Type.Union([WhiteLabelFeatureConfig, Type.Null()]),
+  enabled: Type.Boolean(),
+  instanceWideActive: Type.Boolean(),
+  ownerWorkspaceId: Type.Union([Type.String(), Type.Null()]),
+  canEdit: Type.Boolean(),
+});
+
+export type GetWhiteLabelSettingsResponse = Static<
+  typeof GetWhiteLabelSettingsResponse
+>;
+
+/** Patch fields: omit a key to leave unchanged; send empty string to clear that field. */
+export const UpsertWhiteLabelRequest = Type.Object({
+  workspaceId: Type.String(),
+  favicon: Type.Optional(Type.String()),
+  title: Type.Optional(Type.String()),
+  navCardTitle: Type.Optional(Type.String()),
+  navCardDescription: Type.Optional(Type.String()),
+  navCardIcon: Type.Optional(Type.String()),
+});
+
+export type UpsertWhiteLabelRequest = Static<typeof UpsertWhiteLabelRequest>;
+
+export const DeleteWhiteLabelRequest = Type.Object({
+  workspaceId: Type.String(),
+});
+
+export type DeleteWhiteLabelRequest = Static<typeof DeleteWhiteLabelRequest>;
+
 export const ComputePropertiesGlobalFeatureConfig = Type.Object({
   type: Type.Literal(FeatureNamesEnum.ComputePropertiesGlobal),
   targetIntervalMs: Type.Optional(Type.Number()),
